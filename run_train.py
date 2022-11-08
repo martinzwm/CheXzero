@@ -16,14 +16,16 @@ from simple_tokenizer import SimpleTokenizer
 from train import train_main, load_data, load_clip, preprocess_text
 from zero_shot import run_cxr_zero_shot, run_zero_shot
 
+from accelerate import Accelerator
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cxr_filepath', type=str, default='data/cxr.h5', help="Directory to load chest x-ray image data from.")
     parser.add_argument('--txt_filepath', type=str, default='data/mimic_impressions.csv', help="Directory to load radiology report impressions text from.")
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--save_interval', type=int, default=100)
+    parser.add_argument('--save_interval', type=int, default=1000)
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--save_dir', type=str, default="checkpoints/", help="Directory to save the trained model.")
     parser.add_argument('--seed', type=int, default=1234)
@@ -65,7 +67,11 @@ def make(config):
         optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
     return model, data_loader, device, criterion, optimizer
 
-def train(model, loader, device, criterion, optimizer, config): 
+def train(model, loader, device, criterion, optimizer, config):
+    # Multi-GPU
+    accelerator = Accelerator()
+    model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+
     model_save_dir = os.path.join(config.save_dir, config.model_name)
     if not os.path.exists(model_save_dir): 
         # Create a new folder if not exists
@@ -86,9 +92,10 @@ def train(model, loader, device, criterion, optimizer, config):
 
             texts = data['txt']
             texts = preprocess_text(texts, model) 
+            texts = texts.to(accelerator.device)
             
             # perform step for a single batch
-            loss = train_batch(images, texts, model, device, criterion, optimizer)
+            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator)
             example_ct +=  len(images)
             batch_ct += 1
             running_loss += loss.item()
@@ -105,9 +112,9 @@ def train(model, loader, device, criterion, optimizer, config):
                 print("Saved checkpoint to: ", model_path)
                 save(model, model_path)
                 
-def train_batch(images, texts, model, device, criterion, optimizer):
-    images, texts = images.to(device), texts.to(device)
-    
+def train_batch(images, texts, model, device, criterion, optimizer, accelerator):
+    # images, texts = images.to(device), texts.to(device)
+
     # Forward pass
     logits_per_image, logits_per_text = model(images, texts)
     
@@ -122,7 +129,8 @@ def train_batch(images, texts, model, device, criterion, optimizer):
 
     # Backward pass ⬅
     optimizer.zero_grad()
-    loss.backward()
+    # loss.backward()
+    accelerator.backward(loss)
     
     # Step with optimizer
     optimizer.step()
@@ -137,6 +145,7 @@ def save(model, path):
     torch.save(model.state_dict(), path)
     
 if __name__ == "__main__":
+    torch.manual_seed(123)
     args = parse_args()
     model = model_pipeline(args)
     

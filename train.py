@@ -54,6 +54,8 @@ class CXRDataset(data.Dataset):
         img = np.expand_dims(img, axis=0)
         img = np.repeat(img, 3, axis=0)
         txt = self.txt_dset[idx] # python str
+        if type(txt) == type(float("nan")): # capture bugs led by empty "Impression" sections
+            txt = " "
 
         img = torch.from_numpy(img) # torch, (3, 320, 320)
         if self.transform:
@@ -104,7 +106,7 @@ def load_data(cxr_filepath, txt_filepath, batch_size=4, column='report', pretrai
             if i == 3:
                 break
     
-    loader_params = {'batch_size':batch_size, 'shuffle': True, 'num_workers': 0}
+    loader_params = {'batch_size':batch_size, 'shuffle': True, 'num_workers': 8}
     data_loader = data.DataLoader(torch_dset, **loader_params)
     return data_loader, device
     
