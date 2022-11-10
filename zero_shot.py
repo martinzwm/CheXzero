@@ -88,7 +88,9 @@ def load_clip(model_path, pretrained=False, context_length=77):
         model, preprocess = clip.load("ViT-B/32", device=device, jit=False) 
         try: 
             print(model_path,"using an online model  ")
-            model=torch.load(model_path).to(device)
+            # model=torch.load(model_path).to(device)
+            model.load_state_dict(torch.load(model_path))
+            model = model.to(device)
         except: 
             print("Argument error. Set pretrained = True.", sys.exc_info()[0])
             raise
@@ -109,12 +111,14 @@ def zeroshot_classifier(classnames, templates, model, context_length=77):
     
     Returns PyTorch Tensor, output of the text encoder given templates. 
     """
+    device = next(model.parameters()).device
     with torch.no_grad():
         zeroshot_weights = []
         # compute embedding through model for each class
         for classname in tqdm(classnames):
             texts = [template.format(classname) for template in templates] # format with class
             texts = clip.tokenize(texts, context_length=context_length) # tokenize
+            texts = texts.to(device)
             class_embeddings = model.encode_text(texts) # embed with text encoder
             
             # normalize class_embeddings
@@ -144,10 +148,11 @@ def predict(loader, model, zeroshot_weights, softmax_eval=True, verbose=0):
         
     Returns numpy array, predictions on all test data samples. 
     """
+    device = next(model.parameters()).device
     y_pred = []
     with torch.no_grad():
         for i, data in enumerate(tqdm(loader)):
-            images = data['img']
+            images = data['img'].to(device)
 
             # predict
             image_features = model.encode_image(images) 
@@ -155,7 +160,7 @@ def predict(loader, model, zeroshot_weights, softmax_eval=True, verbose=0):
 
             # obtain logits
             logits = image_features @ zeroshot_weights # (1, num_classes)
-            logits = np.squeeze(logits.numpy(), axis=0) # (num_classes,)
+            logits = np.squeeze(logits.cpu().numpy(), axis=0) # (num_classes,)
         
             if softmax_eval is False: 
                 norm_logits = (logits - logits.mean()) / (logits.std())
