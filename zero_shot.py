@@ -2,6 +2,8 @@ import subprocess
 import numpy as np
 import os
 import sys
+sys.path.append('/opt/conda/envs/biovil/lib/python3.9/site-packages') # add path to biovil text encoder
+
 import pandas as pd
 from PIL import Image
 import h5py
@@ -22,6 +24,8 @@ from sklearn.metrics import average_precision_score
 import clip
 from model import CLIP
 from eval import evaluate, plot_roc, accuracy, sigmoid, bootstrap, compute_cis
+
+from health_multimodal.text.utils import get_cxr_bert
 
 CXR_FILEPATH = '../../project-files/data/test_cxr.h5'
 FINAL_LABEL_PATH = '../../project-files/data/final_paths.csv'
@@ -62,7 +66,7 @@ class CXRTestDataset(data.Dataset):
     
         return sample
 
-def load_clip(model_path, pretrained=False, context_length=77): 
+def load_clip(model_path, pretrained=False, context_length=77, change_text_encoder=False): 
     """
     FUNCTION: load_clip
     ---------------------------------
@@ -86,6 +90,9 @@ def load_clip(model_path, pretrained=False, context_length=77):
         model = CLIP(**params)
     else: 
         model, preprocess = clip.load("ViT-B/32", device=device, jit=False) 
+        if change_text_encoder:
+            tokenizer, text_model = get_cxr_bert()
+            model.encode_text = text_model
         try: 
             print(model_path,"using an online model  ")
             # model=torch.load(model_path).to(device)
@@ -199,7 +206,9 @@ def run_single_prediction(cxr_labels, template, model, loader, softmax_eval=True
     Returns list, predictions from the given template. 
     """
     cxr_phrase = [template]
+    # zeroshot_weights [=] (dim of encoded text, num_classes), for chexzero, dim of encoded text = 512
     zeroshot_weights = zeroshot_classifier(cxr_labels, cxr_phrase, model, context_length=context_length)
+    # y_pred [=] (num_samples, num_classes)
     y_pred = predict(loader, model, zeroshot_weights, softmax_eval=softmax_eval)
     return y_pred
 
@@ -355,6 +364,7 @@ def make(
     cxr_filepath: str, 
     pretrained: bool = True, 
     context_length: bool = 77, 
+    change_text_encoder: bool = False,
 ):
     """
     FUNCTION: make
@@ -376,7 +386,8 @@ def make(
     model = load_clip(
         model_path=model_path, 
         pretrained=pretrained, 
-        context_length=context_length
+        context_length=context_length,
+        change_text_encoder=change_text_encoder,
     )
 
     # load data

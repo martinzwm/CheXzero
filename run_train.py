@@ -1,4 +1,7 @@
 import os
+import sys
+sys.path.append('/opt/conda/envs/biovil/lib/python3.9/site-packages') # add path to biovil text encoder
+
 import pprint
 import argparse
 from tqdm import tqdm
@@ -13,14 +16,18 @@ import clip
 from model import CLIP
 from simple_tokenizer import SimpleTokenizer
 
-from train import train_main, load_data, load_clip, preprocess_text
+from train import train_main, load_data, load_clip, preprocess_text, preprocess_text_bert
 from zero_shot import run_cxr_zero_shot, run_zero_shot
 
 from accelerate import Accelerator
 
+# cxr bert encoder
+from health_multimodal.text.utils import get_cxr_bert
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cxr_filepath', type=str, default='data/cxr.h5', help="Directory to load chest x-ray image data from.")
+    parser.add_argument('--cxr_filepath', type=str, default='data/backup/cxr.h5', help="Directory to load chest x-ray image data from.")
     parser.add_argument('--txt_filepath', type=str, default='data/mimic_impressions.csv', help="Directory to load radiology report impressions text from.")
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=10)
@@ -40,9 +47,13 @@ def parse_args():
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
     model, data_loader, device, criterion, optimizer = make(config)
+    
+    # Change the text encoder to CXR BERT encoder from BioViL
+    tokenizer, text_model = get_cxr_bert()
+    model.encode_text = text_model
 
     # and use them to train the model
-    train(model, data_loader, device, criterion, optimizer, config)
+    train(model, data_loader, device, criterion, optimizer, config, tokenizer=tokenizer)
 
     # save model
     model_path = os.path.join(config.save_dir, str(config.model_name), 'checkpoint.pt')
@@ -67,7 +78,7 @@ def make(config):
         optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
     return model, data_loader, device, criterion, optimizer
 
-def train(model, loader, device, criterion, optimizer, config):
+def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
     # Multi-GPU
     accelerator = Accelerator()
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
@@ -91,7 +102,10 @@ def train(model, loader, device, criterion, optimizer, config):
             images = data['img']
 
             texts = data['txt']
-            texts = preprocess_text(texts, model) 
+            if tokenizer is None: # clip [original chexzero]
+                texts = preprocess_text(texts, model)
+            else: # cxr bert [biovil]
+                texts = preprocess_text_bert(texts, model, tokenizer)
             texts = texts.to(accelerator.device)
             
             # perform step for a single batch

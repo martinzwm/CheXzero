@@ -1,0 +1,4 @@
+,No Finding_auc,Enlarged Cardiomediastinum_auc,Cardiomegaly_auc,Lung Opacity_auc,Lung Lesion_auc,Edema_auc,Consolidation_auc,Pneumonia_auc,Atelectasis_auc,Pneumothorax_auc,Pleural Effusion_auc,Pleural Other_auc,Fracture_auc,Support Devices_auc
+mean,0.3805,0.5984,0.3303,0.7954,0.7021,0.5963,0.7881,0.7834,0.4515,0.4986,0.3689,0.3499,0.4015,0.4003
+lower,0.3098,0.5496,0.2806,0.7564,0.4924,0.5361,0.6951,0.6608,0.3923,0.3582,0.3009,0.2046,0.1562,0.3507
+upper,0.4539,0.6492,0.3819,0.8317,0.883,0.6519,0.8678,0.8831,0.5074,0.6381,0.4312,0.493,0.7249,0.4487
