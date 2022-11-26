@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-
+from bidirectional_cross_attention import BidirectionalCrossAttention
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -313,6 +313,16 @@ class CLIP(nn.Module):
 
         self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        # self.video_mask = torch.ones((1, 4096)).bool()
+        # self.text_mask = torch.ones((1, 8192)).bool()
+
+        # self.joint_cross_attn = BidirectionalCrossAttention(
+        #     dim = 512,
+        #     heads = 8,
+        #     dim_head = 64,
+        #     context_dim = 386
+        # )
+
 
         self.initialize_parameters()
 
@@ -387,9 +397,10 @@ class CLIP(nn.Module):
         logit_scale = self.logit_scale.exp()
         logits_per_image = logit_scale * image_features @ text_features.t()
         logits_per_text = logit_scale * text_features @ image_features.t()
-
+        # print(image_features.shape)
+        # print(text_features.shape)
         # shape = [global_batch_size, global_batch_size]
-        return logits_per_image, logits_per_text
+        return logits_per_image, logits_per_text, image_features, text_features
 
 
 def convert_weights(model: nn.Module):

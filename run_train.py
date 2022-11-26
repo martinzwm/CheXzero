@@ -25,6 +25,7 @@ from accelerate import Accelerator
 from health_multimodal.text.utils import get_cxr_bert
 
 
+from bidirectional_cross_attention import BidirectionalCrossAttention
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cxr_filepath', type=str, default='data/backup/cxr.h5', help="Directory to load chest x-ray image data from.")
@@ -46,14 +47,14 @@ def parse_args():
 
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
-    model, data_loader, device, criterion, optimizer = make(config)
+    model, data_loader, device, criterion, optimizer, video_mask, text_mask, joint_layer, linear= make(config)
     
     # Change the text encoder to CXR BERT encoder from BioViL
     tokenizer, text_model = get_cxr_bert()
     model.encode_text = text_model
 
     # and use them to train the model
-    train(model, data_loader, device, criterion, optimizer, config, tokenizer=tokenizer)
+    train(model, data_loader, device, criterion, optimizer, config, tokenizer=tokenizer, video_mask = video_mask, text_mask = text_mask, joint_layer = joint_layer, linear=linear)
 
     # save model
     model_path = os.path.join(config.save_dir, str(config.model_name), 'checkpoint.pt')
@@ -69,6 +70,19 @@ def make(config):
     model = load_clip(model_path=None, pretrained=pretrained, context_length=config.context_length)
     model.to(device)
     print('Model on Device.')
+    video_mask = torch.ones((1, 64)).bool()
+    text_mask = torch.ones((1, 64)).bool()
+    joint_cross_attn = BidirectionalCrossAttention(
+            dim = 512,
+            heads = 8,
+            dim_head = 64,
+            context_dim = 512
+        )
+    linear = torch.nn.Sequential(
+            nn.Linear(512,64),
+            nn.Linear(64, 2))
+    
+
 
     # make the optimizer 
     criterion = nn.CrossEntropyLoss().cuda()
@@ -76,9 +90,9 @@ def make(config):
         optimizer = optim.AdamW(model.parameters(), lr=config.lr)
     elif config.optimizer == "sgd": 
         optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
-    return model, data_loader, device, criterion, optimizer
+    return model, data_loader, device, criterion, optimizer, video_mask, text_mask, joint_cross_attn, linear
 
-def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
+def train(model, loader, device, criterion, optimizer, config, tokenizer, video_mask, text_mask, joint_layer, linear):
     # Multi-GPU
     accelerator = Accelerator()
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
@@ -109,7 +123,7 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
             texts = texts.to(accelerator.device)
             
             # perform step for a single batch
-            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator)
+            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator,video_mask.to(accelerator.device),text_mask.to(accelerator.device),joint_layer.to(accelerator.device), linear.to(accelerator.device))
             example_ct +=  len(images)
             batch_ct += 1
             running_loss += loss.item()
@@ -126,20 +140,82 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
                 print("Saved checkpoint to: ", model_path)
                 save(model, model_path)
                 
-def train_batch(images, texts, model, device, criterion, optimizer, accelerator):
+def train_batch(images, texts, model, device, criterion, optimizer, accelerator,video_mask, text_mask, joint_layer, linear):
     # images, texts = images.to(device), texts.to(device)
 
     # Forward pass
-    logits_per_image, logits_per_text = model(images, texts)
-    
+    logits_per_image, logits_per_text, img_embed, txt_embed = model(images, texts)
+    img_embed = img_embed.float().to(device)
+    txt_embed = txt_embed.float().to(device)
     # Create labels
     batch_size = images.shape[0]
     labels = torch.arange(batch_size).to(device)
-    
+    print(logits_per_image.shape, logits_per_text.shape)
     # Compute loss
     loss_img = criterion(logits_per_image, labels)
     loss_txt = criterion(logits_per_text, labels)
-    loss = (loss_img + loss_txt)/2 # avg. img and txt loss
+   # print(img_embed.shape, txt_embed.shape)
+    #
+    img_out, txt_out = joint_layer(
+        img_embed.unsqueeze(0),
+        txt_embed.unsqueeze(0),
+        mask = video_mask,
+        context_mask = text_mask
+    )
+    cross_pos =  torch.concat(
+        [img_out.squeeze(0),
+        txt_out.squeeze(0) ], dim=0)
+   # print("cross_pos",cross_pos.shape)
+    joint_out = linear(cross_pos
+    )
+    with torch.no_grad():
+        bs = images.size(0)          
+        weights_i2t = torch.nn.functional.softmax(logits_per_image[:,:bs],dim=1)
+        weights_t2i = torch.nn.functional.softmax(logits_per_text[:,:bs],dim=1)
+
+        weights_i2t.fill_diagonal_(0)
+        weights_t2i.fill_diagonal_(0)
+
+    # select a negative image for each text
+    image_embeds_neg = []    
+    for b in range(bs):
+        neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+        image_embeds_neg.append(img_embed[neg_idx])
+    image_embeds_neg = torch.stack(image_embeds_neg,dim=0)   
+
+    # select a negative text for each image
+    text_embeds_neg = []
+    for b in range(bs):
+        neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+        text_embeds_neg.append(txt_embed[neg_idx])
+    text_embeds_neg = torch.stack(text_embeds_neg,dim=0)     
+
+    # text_embeds_all = torch.cat([txt_embed, text_embeds_neg],dim=0)         
+
+    # image_embeds_all = torch.cat([image_embeds_neg,img_embed],dim=0)
+
+    img_out_neg, txt_out_neg = joint_layer(
+        image_embeds_neg.unsqueeze(0),
+        text_embeds_neg.unsqueeze(0),
+        mask = video_mask,
+        context_mask = text_mask
+    )                    
+
+    cross_neg =  torch.concat(
+        [img_out_neg.squeeze(0),
+        txt_out_neg.squeeze(0) ], dim=0)
+  #  print("cross_neg",cross_neg.shape)
+    joint_out_neg = linear(cross_neg
+    )         
+    joint_out_all = torch.concat([joint_out,joint_out_neg],dim=0)
+    itm_labels = torch.cat([torch.ones(2*bs,dtype=torch.long),torch.zeros(2*bs,dtype=torch.long)],
+                            dim=0).to(accelerator.device)
+    criterion3 = torch.nn.CrossEntropyLoss()
+    loss_itm = criterion3(joint_out_all, itm_labels)     
+    
+    
+    loss = (loss_img + loss_txt + loss_itm)/3 # avg. img and txt loss
+
 
     # Backward pass ⬅
     optimizer.zero_grad()
