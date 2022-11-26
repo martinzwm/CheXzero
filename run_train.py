@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--save_interval', type=int, default=1000)
+    parser.add_argument('--save_interval', type=int, default=3000)
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--save_dir', type=str, default="checkpoints/", help="Directory to save the trained model.")
     parser.add_argument('--seed', type=int, default=1234)
