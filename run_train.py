@@ -150,7 +150,7 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
     # Create labels
     batch_size = images.shape[0]
     labels = torch.arange(batch_size).to(device)
-    print(logits_per_image.shape, logits_per_text.shape)
+   # print(logits_per_image.shape, logits_per_text.shape)
     # Compute loss
     loss_img = criterion(logits_per_image, labels)
     loss_txt = criterion(logits_per_text, labels)
