@@ -382,6 +382,7 @@ class CLIP(nn.Module):
         else:
             x = self.text_model.get_projected_text_embeddings(text, attention_mask)
             x = self.text_model_linear(x)
+            x = self.ln_final(x).type(self.dtype)
         return x
 
     def forward(self, image, text, attention_mask=None):

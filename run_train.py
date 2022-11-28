@@ -30,9 +30,9 @@ def parse_args():
     parser.add_argument('--cxr_filepath', type=str, default='data/backup/cxr.h5', help="Directory to load chest x-ray image data from.")
     parser.add_argument('--txt_filepath', type=str, default='data/mimic_impressions.csv', help="Directory to load radiology report impressions text from.")
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--save_interval', type=int, default=4000)
+    parser.add_argument('--epochs', type=int, default=12)
+    parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--save_interval', type=int, default=5000)
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--save_dir', type=str, default="checkpoints/", help="Directory to save the trained model.")
     parser.add_argument('--seed', type=int, default=1234)
@@ -47,12 +47,6 @@ def parse_args():
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
     model, data_loader, device, criterion, optimizer = make(config)
-
-    # modify model internal to use bert text encoder
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer, text_model = get_cxr_bert()
-    model.text_model = text_model.to(device)
-    model.text_model_linear = nn.Linear(128, 512).to(device)
 
     # and use them to train the model
     train(model, data_loader, device, criterion, optimizer, config, cxr_bert=True)
@@ -69,6 +63,12 @@ def make(config):
     pretrained = not config.random_init
     data_loader, device = load_data(config.cxr_filepath, config.txt_filepath, batch_size=config.batch_size, pretrained=pretrained, column="impression")
     model = load_clip(model_path=None, pretrained=pretrained, context_length=config.context_length)
+    
+    # modify model internal to use bert text encoder
+    tokenizer, text_model = get_cxr_bert()
+    model.text_model = text_model
+    model.text_model_linear = nn.Linear(128, 512)
+    
     model.to(device)
     print('Model on Device.')
 

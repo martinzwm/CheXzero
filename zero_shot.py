@@ -25,7 +25,7 @@ import clip
 from model import CLIP
 from eval import evaluate, plot_roc, accuracy, sigmoid, bootstrap, compute_cis
 
-from health_multimodal.text.utils import get_cxr_bert
+from health_multimodal.text.utils import get_cxr_bert, get_cxr_bert_inference
 
 CXR_FILEPATH = '../../project-files/data/test_cxr.h5'
 FINAL_LABEL_PATH = '../../project-files/data/final_paths.csv'
@@ -92,8 +92,8 @@ def load_clip(model_path, pretrained=False, context_length=77, change_text_encod
         model, preprocess = clip.load("ViT-B/32", device=device, jit=False) 
         if change_text_encoder:
             tokenizer, text_model = get_cxr_bert()
-            model.text_model = text_model
-            model.text_model_linear = nn.Linear(128, 512)
+            # model.text_model = text_model
+            # model.text_model_linear = nn.Linear(128, 512)
         try: 
             print(model_path,"using an online model  ")
             # model=torch.load(model_path).to(device)
@@ -104,7 +104,7 @@ def load_clip(model_path, pretrained=False, context_length=77, change_text_encod
             raise
     return model
 
-def zeroshot_classifier(classnames, templates, model, context_length=77):
+def zeroshot_classifier(classnames, templates, model, context_length=77, change_text_encoder=False):
     """
     FUNCTION: zeroshot_classifier
     -------------------------------------
@@ -120,14 +120,22 @@ def zeroshot_classifier(classnames, templates, model, context_length=77):
     Returns PyTorch Tensor, output of the text encoder given templates. 
     """
     device = next(model.parameters()).device
+    text_inference = get_cxr_bert_inference()
+
     with torch.no_grad():
         zeroshot_weights = []
         # compute embedding through model for each class
         for classname in tqdm(classnames):
             texts = [template.format(classname) for template in templates] # format with class
-            texts = clip.tokenize(texts, context_length=context_length) # tokenize
-            texts = texts.to(device)
-            class_embeddings = model.encode_text(texts) # embed with text encoder
+            if change_text_encoder == False: # original chexzero
+                texts = clip.tokenize(texts, context_length=context_length) # tokenize
+                texts = texts.to(device)
+                class_embeddings = model.encode_text(texts) # embed with text encoder
+            else:
+                tokenizer_output = text_inference.tokenize_input_prompts(texts)
+                texts = tokenizer_output['input_ids'].to(device)
+                attention_mask = tokenizer_output['attention_mask'].to(device)
+                class_embeddings = model.encode_text(texts, attention_mask=attention_mask)
             
             # normalize class_embeddings
             class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
@@ -189,7 +197,7 @@ def predict(loader, model, zeroshot_weights, softmax_eval=True, verbose=0):
     y_pred = np.array(y_pred)
     return np.array(y_pred)
 
-def run_single_prediction(cxr_labels, template, model, loader, softmax_eval=True, context_length=77): 
+def run_single_prediction(cxr_labels, template, model, loader, softmax_eval=True, context_length=77, change_text_encoder=False): 
     """
     FUNCTION: run_single_prediction
     --------------------------------------
@@ -208,7 +216,7 @@ def run_single_prediction(cxr_labels, template, model, loader, softmax_eval=True
     """
     cxr_phrase = [template]
     # zeroshot_weights [=] (dim of encoded text, num_classes), for chexzero, dim of encoded text = 512
-    zeroshot_weights = zeroshot_classifier(cxr_labels, cxr_phrase, model, context_length=context_length)
+    zeroshot_weights = zeroshot_classifier(cxr_labels, cxr_phrase, model, context_length=context_length, change_text_encoder=change_text_encoder)
     # y_pred [=] (num_samples, num_classes)
     y_pred = predict(loader, model, zeroshot_weights, softmax_eval=softmax_eval)
     return y_pred
@@ -257,7 +265,7 @@ def process_alt_labels(alt_labels_dict, cxr_labels):
     
     return alt_label_list, alt_label_idx_map 
 
-def run_softmax_eval(model, loader, eval_labels: list, pair_template: tuple, context_length: int = 77): 
+def run_softmax_eval(model, loader, eval_labels: list, pair_template: tuple, context_length: int = 77, change_text_encoder=False): 
     """
     Run softmax evaluation to obtain a single prediction from the model.
     """
@@ -267,9 +275,9 @@ def run_softmax_eval(model, loader, eval_labels: list, pair_template: tuple, con
 
     # get pos and neg predictions, (num_samples, num_classes)
     pos_pred = run_single_prediction(eval_labels, pos, model, loader, 
-                                     softmax_eval=True, context_length=context_length) 
+                                     softmax_eval=True, context_length=context_length, change_text_encoder=change_text_encoder) 
     neg_pred = run_single_prediction(eval_labels, neg, model, loader, 
-                                     softmax_eval=True, context_length=context_length) 
+                                     softmax_eval=True, context_length=context_length, change_text_encoder=change_text_encoder) 
 
     # compute probabilities with softmax
     sum_pred = np.exp(pos_pred) + np.exp(neg_pred)
