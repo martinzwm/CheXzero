@@ -30,6 +30,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import sys
+sys.path.append('/opt/conda/envs/biovil/lib/python3.9/site-packages') # add path to biovil text encoder
+# cxr bert encoder
+from health_multimodal.text.utils import get_cxr_bert, get_cxr_bert_inference
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -313,6 +317,8 @@ class CLIP(nn.Module):
 
         self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.initialize_parameters()
 
@@ -360,24 +366,28 @@ class CLIP(nn.Module):
     def encode_image(self, image):
         return self.visual(image.type(self.dtype))
 
-    def encode_text(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
+    def encode_text(self, text, attention_mask=None):
+        if attention_mask is None:
+            x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
-        x = x + self.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+            x = x + self.positional_embedding.type(self.dtype)
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            x = self.ln_final(x).type(self.dtype)
 
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
-
+            # x.shape = [batch_size, n_ctx, transformer.width]
+            # take features from the eot embedding (eot_token is the highest number in each sequence)
+            x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        else:
+            x = self.text_model.get_projected_text_embeddings(text, attention_mask)
+            x = self.text_model_linear(x)
         return x
 
-    def forward(self, image, text):
+    def forward(self, image, text, attention_mask=None):
         image_features = self.encode_image(image)
-        text_features = self.encode_text(text)
+        text_features = self.encode_text(text, attention_mask)
+        text_features = text_features.half() # convert to half precision to match the image features 
 
         # normalized features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)

@@ -16,23 +16,23 @@ import clip
 from model import CLIP
 from simple_tokenizer import SimpleTokenizer
 
-from train import train_main, load_data, load_clip, preprocess_text, preprocess_text_bert
+from train import train_main, load_data, load_clip, preprocess_text
 from zero_shot import run_cxr_zero_shot, run_zero_shot
 
 from accelerate import Accelerator
 
 # cxr bert encoder
-from health_multimodal.text.utils import get_cxr_bert
+from health_multimodal.text.utils import get_cxr_bert, get_cxr_bert_inference
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cxr_filepath', type=str, default='data/backup/cxr.h5', help="Directory to load chest x-ray image data from.")
     parser.add_argument('--txt_filepath', type=str, default='data/mimic_impressions.csv', help="Directory to load radiology report impressions text from.")
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--save_interval', type=int, default=3000)
+    parser.add_argument('--save_interval', type=int, default=4000)
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--save_dir', type=str, default="checkpoints/", help="Directory to save the trained model.")
     parser.add_argument('--seed', type=int, default=1234)
@@ -47,13 +47,15 @@ def parse_args():
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
     model, data_loader, device, criterion, optimizer = make(config)
-    
-    # Change the text encoder to CXR BERT encoder from BioViL
+
+    # modify model internal to use bert text encoder
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer, text_model = get_cxr_bert()
-    model.encode_text = text_model
+    model.text_model = text_model.to(device)
+    model.text_model_linear = nn.Linear(128, 512).to(device)
 
     # and use them to train the model
-    train(model, data_loader, device, criterion, optimizer, config, tokenizer=tokenizer)
+    train(model, data_loader, device, criterion, optimizer, config, cxr_bert=True)
 
     # save model
     model_path = os.path.join(config.save_dir, str(config.model_name), 'checkpoint.pt')
@@ -78,7 +80,7 @@ def make(config):
         optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
     return model, data_loader, device, criterion, optimizer
 
-def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
+def train(model, loader, device, criterion, optimizer, config, cxr_bert=False):
     # Multi-GPU
     accelerator = Accelerator()
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
@@ -87,6 +89,10 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
     if not os.path.exists(model_save_dir): 
         # Create a new folder if not exists
         os.makedirs(model_save_dir)
+    
+    # For cxr bert text encoder
+    text_inference = get_cxr_bert_inference()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Run training
     total_batches = len(loader) * config.epochs
@@ -102,14 +108,20 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
             images = data['img']
 
             texts = data['txt']
-            if tokenizer is None: # clip [original chexzero]
+
+            # preprocess text
+            if not cxr_bert:
                 texts = preprocess_text(texts, model)
-            else: # cxr bert [biovil]
-                texts = preprocess_text_bert(texts, model, tokenizer)
+                attention_mask = None
+            else:
+                tokenizer_output = text_inference.tokenize_input_prompts(texts)
+                texts = tokenizer_output['input_ids'].to(accelerator.device)
+                attention_mask = tokenizer_output['attention_mask'].to(accelerator.device)
+
             texts = texts.to(accelerator.device)
             
             # perform step for a single batch
-            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator)
+            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator, attention_mask=attention_mask)
             example_ct +=  len(images)
             batch_ct += 1
             running_loss += loss.item()
@@ -126,11 +138,11 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer=None):
                 print("Saved checkpoint to: ", model_path)
                 save(model, model_path)
                 
-def train_batch(images, texts, model, device, criterion, optimizer, accelerator):
+def train_batch(images, texts, model, device, criterion, optimizer, accelerator, attention_mask=None):
     # images, texts = images.to(device), texts.to(device)
 
     # Forward pass
-    logits_per_image, logits_per_text = model(images, texts)
+    logits_per_image, logits_per_text = model(images, texts, attention_mask=attention_mask)
     
     # Create labels
     batch_size = images.shape[0]
