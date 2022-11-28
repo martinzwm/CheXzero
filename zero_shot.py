@@ -92,8 +92,9 @@ def load_clip(model_path, pretrained=False, context_length=77, change_text_encod
         model, preprocess = clip.load("ViT-B/32", device=device, jit=False) 
         if change_text_encoder:
             tokenizer, text_model = get_cxr_bert()
-            # model.text_model = text_model
-            # model.text_model_linear = nn.Linear(128, 512)
+            model.text_model = text_model
+            model.text_model_l1 = nn.Linear(128, 512)
+            model.text_model_l2 = nn.Linear(512, 512)
         try: 
             print(model_path,"using an online model  ")
             # model=torch.load(model_path).to(device)

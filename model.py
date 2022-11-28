@@ -381,7 +381,8 @@ class CLIP(nn.Module):
             x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
         else:
             x = self.text_model.get_projected_text_embeddings(text, attention_mask)
-            x = self.text_model_linear(x)
+            x = F.relu(self.text_model_l1(x))
+            x = self.text_model_l2(x)
             x = self.ln_final(x).type(self.dtype)
         return x
 

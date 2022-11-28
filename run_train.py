@@ -20,6 +20,7 @@ from train import train_main, load_data, load_clip, preprocess_text
 from zero_shot import run_cxr_zero_shot, run_zero_shot
 
 from accelerate import Accelerator
+from visualize import *
 
 # cxr bert encoder
 from health_multimodal.text.utils import get_cxr_bert, get_cxr_bert_inference
@@ -30,7 +31,7 @@ def parse_args():
     parser.add_argument('--cxr_filepath', type=str, default='data/backup/cxr.h5', help="Directory to load chest x-ray image data from.")
     parser.add_argument('--txt_filepath', type=str, default='data/mimic_impressions.csv', help="Directory to load radiology report impressions text from.")
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=12)
+    parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--save_interval', type=int, default=5000)
     parser.add_argument('--log_interval', type=int, default=10)
@@ -59,6 +60,7 @@ def model_pipeline(config, verbose=0):
         print(model)
     return model
 
+@make_wandb
 def make(config): 
     pretrained = not config.random_init
     data_loader, device = load_data(config.cxr_filepath, config.txt_filepath, batch_size=config.batch_size, pretrained=pretrained, column="impression")
@@ -67,7 +69,8 @@ def make(config):
     # modify model internal to use bert text encoder
     tokenizer, text_model = get_cxr_bert()
     model.text_model = text_model
-    model.text_model_linear = nn.Linear(128, 512)
+    model.text_model_l1 = nn.Linear(128, 512)
+    model.text_model_l2 = nn.Linear(512, 512)
     
     model.to(device)
     print('Model on Device.')
@@ -163,10 +166,12 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
         
     return loss
 
+@train_log_wandb
 def train_log(loss, example_ct, epoch):
     loss = float(loss)
     print(f"Loss after " + str(example_ct).zfill(5) + f" examples: {loss:.3f}")
-    
+
+@save_wandb
 def save(model, path): 
     torch.save(model.state_dict(), path)
     
