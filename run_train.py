@@ -47,10 +47,10 @@ def parse_args():
 
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
-    model, data_loader, device, criterion, optimizer = make(config)
+    model, data_loader, device, criterion, optimizer = make(config, cxr_bert=False)
 
     # and use them to train the model
-    train(model, data_loader, device, criterion, optimizer, config, cxr_bert=True)
+    train(model, data_loader, device, criterion, optimizer, config, cxr_bert=False)
 
     # save model
     model_path = os.path.join(config.save_dir, str(config.model_name), 'checkpoint.pt')
@@ -61,16 +61,17 @@ def model_pipeline(config, verbose=0):
     return model
 
 @make_wandb
-def make(config): 
+def make(config, cxr_bert=False): 
     pretrained = not config.random_init
     data_loader, device = load_data(config.cxr_filepath, config.txt_filepath, batch_size=config.batch_size, pretrained=pretrained, column="impression")
     model = load_clip(model_path=None, pretrained=pretrained, context_length=config.context_length)
     
     # modify model internal to use bert text encoder
-    tokenizer, text_model = get_cxr_bert()
-    model.text_model = text_model
-    model.text_model_l1 = nn.Linear(128, 512)
-    model.text_model_l2 = nn.Linear(512, 512)
+    if cxr_bert:
+        tokenizer, text_model = get_cxr_bert()
+        model.text_model = text_model
+        model.text_model_l1 = nn.Linear(128, 512)
+        model.text_model_l2 = nn.Linear(512, 512)
     
     model.to(device)
     print('Model on Device.')
