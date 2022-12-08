@@ -5,7 +5,7 @@ sys.path.append('/opt/conda/envs/biovil/lib/python3.9/site-packages') # add path
 import pprint
 import argparse
 from tqdm import tqdm
-
+import numpy as np
 import torch
 from torch.utils import data
 from torch import nn
@@ -16,13 +16,12 @@ import clip
 from model import CLIP
 from simple_tokenizer import SimpleTokenizer
 
-from train import train_main, load_data, load_clip, preprocess_text, preprocess_text_bert
+from train import train_main, load_data, load_clip, preprocess_text
 from zero_shot import run_cxr_zero_shot, run_zero_shot
 
-from accelerate import Accelerator
+from visualize import *
 
-# cxr bert encoder
-from health_multimodal.text.utils import get_cxr_bert
+from accelerate import Accelerator
 
 
 from bidirectional_cross_attention import BidirectionalCrossAttention
@@ -47,14 +46,10 @@ def parse_args():
 
 def model_pipeline(config, verbose=0): 
     # make the model, data, and optimization problem
-    model, data_loader, device, criterion, optimizer, video_mask, text_mask, joint_layer, linear= make(config)
-    
-    # Change the text encoder to CXR BERT encoder from BioViL
-    tokenizer, text_model = get_cxr_bert()
-    model.encode_text = text_model
+    model, data_loader, device, criterion, optimizer, joint_layer, linear= make(config)
 
     # and use them to train the model
-    train(model, data_loader, device, criterion, optimizer, config, tokenizer=tokenizer, video_mask = video_mask, text_mask = text_mask, joint_layer = joint_layer, linear=linear)
+    train(model, data_loader, device, criterion, optimizer, config, joint_layer = joint_layer, linear=linear)
 
     # save model
     model_path = os.path.join(config.save_dir, str(config.model_name), 'checkpoint.pt')
@@ -64,14 +59,14 @@ def model_pipeline(config, verbose=0):
         print(model)
     return model
 
+@make_wandb
 def make(config): 
     pretrained = not config.random_init
     data_loader, device = load_data(config.cxr_filepath, config.txt_filepath, batch_size=config.batch_size, pretrained=pretrained, column="impression")
     model = load_clip(model_path=None, pretrained=pretrained, context_length=config.context_length)
     model.to(device)
     print('Model on Device.')
-    video_mask = torch.ones((1, 64)).bool()
-    text_mask = torch.ones((1, 64)).bool()
+
     joint_cross_attn = BidirectionalCrossAttention(
             dim = 512,
             heads = 8,
@@ -90,9 +85,9 @@ def make(config):
         optimizer = optim.AdamW(model.parameters(), lr=config.lr)
     elif config.optimizer == "sgd": 
         optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
-    return model, data_loader, device, criterion, optimizer, video_mask, text_mask, joint_cross_attn, linear
+    return model, data_loader, device, criterion, optimizer,joint_cross_attn, linear
 
-def train(model, loader, device, criterion, optimizer, config, tokenizer, video_mask, text_mask, joint_layer, linear):
+def train(model, loader, device, criterion, optimizer, config, joint_layer, linear):
     # Multi-GPU
     accelerator = Accelerator()
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
@@ -116,14 +111,11 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer, video_
             images = data['img']
 
             texts = data['txt']
-            if tokenizer is None: # clip [original chexzero]
-                texts = preprocess_text(texts, model)
-            else: # cxr bert [biovil]
-                texts = preprocess_text_bert(texts, model, tokenizer)
+            texts = preprocess_text(texts, model)
             texts = texts.to(accelerator.device)
             
             # perform step for a single batch
-            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator,video_mask.to(accelerator.device),text_mask.to(accelerator.device),joint_layer.to(accelerator.device), linear.to(accelerator.device))
+            loss = train_batch(images, texts, model, device, criterion, optimizer, accelerator,joint_layer.to(accelerator.device), linear.to(accelerator.device))
             example_ct +=  len(images)
             batch_ct += 1
             running_loss += loss.item()
@@ -140,7 +132,7 @@ def train(model, loader, device, criterion, optimizer, config, tokenizer, video_
                 print("Saved checkpoint to: ", model_path)
                 save(model, model_path)
                 
-def train_batch(images, texts, model, device, criterion, optimizer, accelerator,video_mask, text_mask, joint_layer, linear):
+def train_batch(images, texts, model, device, criterion, optimizer, accelerator, joint_layer, linear):
     # images, texts = images.to(device), texts.to(device)
 
     # Forward pass
@@ -155,7 +147,9 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
     loss_img = criterion(logits_per_image, labels)
     loss_txt = criterion(logits_per_text, labels)
    # print(img_embed.shape, txt_embed.shape)
-    #
+  #  print(img_embed.shape, txt_embed.shape)
+    video_mask = torch.ones((1, img_embed.shape[0])).bool().cuda()
+    text_mask = torch.ones((1, txt_embed.shape[0])).bool().cuda()
     img_out, txt_out = joint_layer(
         img_embed.unsqueeze(0),
         txt_embed.unsqueeze(0),
@@ -170,8 +164,8 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
     )
     with torch.no_grad():
         bs = images.size(0)          
-        weights_i2t = torch.nn.functional.softmax(logits_per_image[:,:bs],dim=1)
-        weights_t2i = torch.nn.functional.softmax(logits_per_text[:,:bs],dim=1)
+        weights_i2t = torch.nan_to_num(torch.nn.functional.softmax(logits_per_image[:,:bs],dim=1),0)
+        weights_t2i =torch.nan_to_num( torch.nn.functional.softmax(logits_per_text[:,:bs],dim=1),0)
 
         weights_i2t.fill_diagonal_(0)
         weights_t2i.fill_diagonal_(0)
@@ -179,14 +173,15 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
     # select a negative image for each text
     image_embeds_neg = []    
     for b in range(bs):
-        neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+
+        neg_idx = np.random.randint(0,bs)
         image_embeds_neg.append(img_embed[neg_idx])
     image_embeds_neg = torch.stack(image_embeds_neg,dim=0)   
 
     # select a negative text for each image
     text_embeds_neg = []
     for b in range(bs):
-        neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+        neg_idx = np.random.randint(0,bs)
         text_embeds_neg.append(txt_embed[neg_idx])
     text_embeds_neg = torch.stack(text_embeds_neg,dim=0)     
 
@@ -227,10 +222,12 @@ def train_batch(images, texts, model, device, criterion, optimizer, accelerator,
         
     return loss
 
+@train_log_wandb
 def train_log(loss, example_ct, epoch):
     loss = float(loss)
     print(f"Loss after " + str(example_ct).zfill(5) + f" examples: {loss:.3f}")
-    
+
+@save_wandb
 def save(model, path): 
     torch.save(model.state_dict(), path)
     
